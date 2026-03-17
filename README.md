@@ -23,14 +23,14 @@ Works on **macOS** and **Windows**. No Tkinter, no web framework, pure pip depen
 
 ## What This App Does
 
-You open the app, pick a folder, set a short token (password), and click **Start Sharing**.  
+You open the app, pick a folder, and click **Start Sharing**.  
 The app spins up an HTTP server on your machine and exposes it via an ngrok HTTPS tunnel.  
-Anyone who has the link+token can browse the folder and download files through a clean web interface — they cannot upload, delete, or access anything outside the shared folder.
+Anyone who has the link can browse the folder and download files through a clean web interface — they cannot upload, delete, or access anything outside the shared folder.
 
 **Key capabilities:**
 - Share any folder (photos, videos, ZIPs, PDFs) without cloud uploads.
 - Optional ngrok link so clients outside your LAN can download.
-- Token-gated: only people with `?t=<token>` in the URL can see anything.
+- One-click download: a **Download entire folder** button creates a ZIP of the shared folder.
 - 50 GB+ downloads work (16 MB streaming chunks, HTTP Range support for resume).
 - Hidden files (`.DS_Store`, `.git`, etc.) are filtered by default.
 - Access log visible in real time inside the desktop app.
@@ -62,8 +62,7 @@ Anyone who has the link+token can browse the folder and download files through a
           │    SecureHandler        │
           │  (per-request class)    │
           │                         │
-          │  do_GET → token check   │
-          │         → traversal     │
+          │  do_GET → traversal     │
           │         → containment   │
           │         → hidden filter │
           │         → serve dir/file│
@@ -76,14 +75,13 @@ Anyone who has the link+token can browse the folder and download files through a
 
 ```
 Browser (client)
-  └─ GET /Photos/IMG_001.jpg?t=mysecret
+  └─ GET /Photos/IMG_001.jpg
        │
   ngrok HTTPS tunnel  (if public link enabled)
        │
   ThreadingHTTPServer  (0.0.0.0:8080)
        │
   SecureHandler.do_GET()
-       ├─ token check            403 if wrong
        ├─ decode + sanitise URL  403 if ".."
        ├─ Path containment check 403 if escape attempt
        ├─ hidden file check      403 if dot-file
@@ -109,17 +107,7 @@ This is checked **after** URL decoding and path joining, so `%2e%2e%2f` tricks d
 
 Only `do_GET` does real work.  `do_POST`, `do_PUT`, `do_DELETE`, `do_PATCH` all return **405 Read-only** unconditionally. There is no way to write to disk through this server.
 
-### 3. Token Gating
-
-Every request is checked:
-```python
-if require_token and query.get("t", [""])[0] != token:
-    self._respond_text(403, b"403 Forbidden")
-    return
-```
-The token travels as a URL query parameter (`?t=value`).  All generated links include it automatically, so the client never needs to type it — just open the link.
-
-### 4. Hidden File Filtering
+### 3. Hidden File Filtering
 
 ```python
 def is_hidden(relative_path: Path) -> bool:
@@ -127,7 +115,7 @@ def is_hidden(relative_path: Path) -> bool:
 ```
 Any component starting with `.` is blocked at 403.  This hides `.DS_Store`, `.git/`, `.env`, etc. at every depth level.
 
-### 5. Security Response Headers
+### 4. Security Response Headers
 
 Every response sends:
 ```
@@ -138,7 +126,7 @@ Content-Security-Policy: default-src 'self'; style-src 'unsafe-inline'
 Cache-Control: no-store
 ```
 
-### 6. Large-file Streaming
+### 5. Large-file Streaming
 
 Files are never loaded into RAM. `_serve_file()` opens the file in binary read mode, seeks to the requested range, and writes `CHUNK_SIZE = 16 MB` at a time:
 ```python
@@ -164,11 +152,10 @@ Holds every user-configured value:
 | `share_folder` | str | Absolute path being shared |
 | `title` | str | Gallery title shown in the browser |
 | `port` | int | TCP port (default 8080) |
-| `require_token` | bool | Whether to check the token |
-| `token` | str | The token string (no length requirement) |
 | `show_hidden` | bool | Whether to serve dot-files |
 | `enable_public_link` | bool | Whether to start an ngrok tunnel |
-| `ngrok_auth_token` | str | Your ngrok account token (optional) |
+
+ngrok auth is loaded from environment (see [ngrok Setup](#ngrok-setup)).
 
 Saved to / loaded from JSON in the home directory between sessions.
 
@@ -186,7 +173,7 @@ Uses `json.loads` / `json.dumps` with `dataclasses.asdict()`.  Gracefully falls 
 ### `build_handler(...)` — factory function
 
 ```python
-def build_handler(share_root, title, require_token, token, show_hidden, event_logger):
+def build_handler(share_root, title, show_hidden, event_logger):
     class SecureHandler(http.server.BaseHTTPRequestHandler):
         ...
     return SecureHandler
@@ -199,17 +186,15 @@ This pattern **closes over** the configuration values so the handler class doesn
 ### `SecureHandler`
 
 **`do_GET`** — the only real method:
-1. Parse the URL, extract `?t=` query param.
-2. Token check → 403 if wrong.
-3. URL-decode the path, split on `/`, reject any `..` or `.` component.
-4. Join decoded parts onto `share_root`.
-5. `is_within_root()` — resolve and compare → 403 if escape.
-6. Existence check → 404 if missing.
-7. Hidden file check → 403 if any component starts with `.`.
-8. Dispatch to `_serve_directory()` or `_serve_file()`.
+1. URL-decode the path, split on `/`, reject any `..` or `.` component.
+2. Join decoded parts onto `share_root`.
+3. `is_within_root()` — resolve and compare → 403 if escape.
+4. Existence check → 404 if missing.
+5. Hidden file check → 403 if any component starts with `.`.
+6. Dispatch to `_serve_directory()` or `_serve_file()`.
 
 **`_serve_directory()`** — generates an HTML page:
-- Breadcrumb navigation links (all include token).
+- Breadcrumb navigation links.
 - Entries sorted folders-first, then files, both case-insensitively.
 - Each rendered as a card with emoji icon, name, and size (for files) or "Folder" (for dirs).
 - A "Download" badge on every file card.
@@ -234,8 +219,8 @@ Manages the server lifecycle and the pyngrok tunnel.
 4. Creates `ThreadingHTTPServer("0.0.0.0", port)`.  Binding to `0.0.0.0` makes it reachable from other devices on the LAN, not just localhost.
 5. Starts `serve_forever()` on a **daemon thread** — this thread dies automatically when the Python process exits.
 6. Detects local IP with a UDP connect trick (no packet sent; just reads the kernel's routing decision).
-7. If `enable_public_link`: calls `ngrok.set_auth_token()` (if provided) then `ngrok.connect(addr=port, bind_tls=True)`.  pyngrok launches the ngrok binary, starts a HTTPS tunnel, and returns a tunnel object with `.public_url`.
-8. Returns `(local_url_with_token, public_url_with_token)`.
+7. If `enable_public_link`: calls `ngrok.set_auth_token()` (if `NGROK_AUTH_TOKEN` is set) then `ngrok.connect(addr=port, bind_tls=True)`.  pyngrok launches the ngrok binary, starts a HTTPS tunnel, and returns a tunnel object with `.public_url`.
+8. Returns `(local_url, public_url)`.
 
 **`stop()`:**
 1. `server.shutdown()` — signals `serve_forever()` to stop.
@@ -256,7 +241,7 @@ The main GUI class.  Built entirely with PySide6 Qt widgets:
 | Widget | Purpose |
 |---|---|
 | `QGroupBox` + `QFormLayout` | Settings section (labeled rows) |
-| `QLineEdit` | Text inputs (folder, title, token, ngrok token, link display) |
+| `QLineEdit` | Text inputs (folder, title, link display) |
 | `QSpinBox` | Port number (range 1024–65535) |
 | `QCheckBox` | Boolean options |
 | `QPushButton` | Browse, Start, Stop, Open, Copy |
@@ -300,7 +285,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # 4. Run the app
-python3 gallery_mac.py
+python3 main.py
 ```
 
 > **Tip — convenience launcher:**  Create a shell script `start.sh`:
@@ -308,7 +293,7 @@ python3 gallery_mac.py
 > #!/bin/bash
 > cd "$(dirname "$0")"
 > source .venv/bin/activate
-> python3 gallery_mac.py
+> python3 main.py
 > ```
 > Then `chmod +x start.sh` and double-click it from Finder (you may need to allow it under System Settings → Privacy & Security).
 
@@ -327,7 +312,7 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # 4. Run
-python gallery_windows.py
+python main.py
 ```
 
 > **Tip — convenience launcher:**  Create `start_gallery.bat` in the project root:
@@ -335,7 +320,7 @@ python gallery_windows.py
 > @echo off
 > cd /d "%~dp0"
 > call .venv\Scripts\activate
-> python gallery_windows.py
+> python main.py
 > pause
 > ```
 > Double-click it to launch. Remove `pause` if you don't want the terminal window.
@@ -350,11 +335,13 @@ ngrok is optional. Skip it if you only need to share on your local network (same
 
 1. Create a free account at [https://ngrok.com](https://ngrok.com).
 2. Go to your [ngrok dashboard](https://dashboard.ngrok.com/get-started/your-authtoken) and copy your authtoken.
-3. Paste the token into the **ngrok auth token** field in the app.
+3. Create a local `.env` file (see `.env.example`) and set:
+    ```
+    NGROK_AUTH_TOKEN=your_token_here
+    ```
+    (Alternatively, export `NGROK_AUTH_TOKEN` in your shell environment.)
 4. Check **Enable public ngrok link**.
 5. Click **Start Sharing** — the public HTTPS link will appear in the Public ngrok field.
-
-The token is stored in your local config file and auto-filled on next launch.
 
 > **Free tier limits:**  One concurrent tunnel, 1 GB/month bandwidth. Sufficient for occasional client deliveries.  
 > For heavy use, a paid ngrok plan removes bandwidth caps.
@@ -364,14 +351,13 @@ The token is stored in your local config file and auto-filled on next launch.
 ## Daily Workflow
 
 ```
-1. Open terminal  →  source .venv/bin/activate  →  python3 gallery_mac.py
+1. Open terminal  →  source .venv/bin/activate  →  python3 main.py
 2. Click Browse   →  select your delivery folder
-3. Fill in Token  →  e.g. "smith-wedding" (share this with your client)
-4. (Optional) Paste ngrok token and check "Enable public ngrok link"
-5. Click ▶ Start Sharing
-6. Copy the Link  →  send to client (Local link for LAN, Public for remote)
-7. Watch the Access Log  →  see when files are downloaded
-8. Click ⏹ Stop  →  tunnel and server tear down cleanly
+3. (Optional) Set `NGROK_AUTH_TOKEN` in `.env` and check "Enable public ngrok link"
+4. Click ▶ Start Sharing
+5. Copy the Link  →  send to client (Local link for LAN, Public for remote)
+6. Watch the Access Log  →  see when files are downloaded
+7. Click ⏹ Stop  →  tunnel and server tear down cleanly
 ```
 
 Your client opens the link in any browser, browses the gallery, and clicks files to download.  
@@ -388,7 +374,7 @@ To find what's using a port:
 - **Windows:** `netstat -ano | findstr :8080`
 
 ### "ngrok not connecting"
-- Verify your ngrok auth token is correct (dashboard → Your Authtoken).
+- Verify `NGROK_AUTH_TOKEN` is set correctly (dashboard → Your Authtoken).
 - Check your internet connection.
 - Free ngrok allows only one concurrent tunnel — close any other ngrok sessions.
 - If `pyngrok` can't find the ngrok binary, it will download it automatically on first run. Allow it.
@@ -397,8 +383,8 @@ To find what's using a port:
 The path in the folder field doesn't exist or was moved.  Click Browse again to reselect.
 
 ### Client says "403 Forbidden"
-- The token in the URL is wrong or missing. Resend the correct link (copy it from the app).
-- If you stopped and restarted with a different token, the old link is invalid.
+- You're likely trying to access a hidden file/folder (dotfiles are blocked by default), or the URL contains invalid path components like `..`.
+- If you intentionally want to share hidden files, enable "Show hidden files".
 
 ### Downloaded file is corrupt or incomplete
 - The download was interrupted. The server supports HTTP Range requests — use a download manager (e.g. `wget`, `curl -C -`) to resume.

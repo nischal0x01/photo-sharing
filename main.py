@@ -2,26 +2,34 @@
 """
 Secure Client Gallery — macOS build
 Desktop GUI app (PySide6) that serves a selected folder as a read-only
-HTTP gallery with token-based access control and optional ngrok tunnel.
+HTTP gallery with optional ngrok tunnel.
 
-Run:  python3 gallery_mac.py
+Run:  python3 main.py
 """
 from __future__ import annotations
 
+import os
 import html
 import http.server
 import json
 import mimetypes
 import shutil
 import socket
+import tempfile
 import threading
 import time
 import urllib.parse
+import zipfile
 import webbrowser
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from pyngrok import ngrok
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover
+    load_dotenv = None
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QFont, QGuiApplication
 from PySide6.QtWidgets import (
@@ -49,6 +57,9 @@ DEFAULT_TITLE = "Client Gallery"
 DEFAULT_PORT = 8080
 CHUNK_SIZE = 16 * 1024 * 1024  # 16 MB per read — handles 50 GB+ without RAM issues
 
+if load_dotenv is not None:
+    load_dotenv()
+
 # ─────────────────────────── config ───────────────────────────────────────────
 
 
@@ -57,11 +68,8 @@ class AppConfig:
     share_folder: str = ""
     title: str = DEFAULT_TITLE
     port: int = DEFAULT_PORT
-    require_token: bool = True
-    token: str = ""
     show_hidden: bool = False
     enable_public_link: bool = True
-    ngrok_auth_token: str = ""
 
 
 def load_config() -> AppConfig:
@@ -72,11 +80,8 @@ def load_config() -> AppConfig:
                 share_folder=str(d.get("share_folder", "")),
                 title=str(d.get("title", DEFAULT_TITLE)),
                 port=int(d.get("port", DEFAULT_PORT)),
-                require_token=bool(d.get("require_token", True)),
-                token=str(d.get("token", "")),
                 show_hidden=bool(d.get("show_hidden", False)),
                 enable_public_link=bool(d.get("enable_public_link", True)),
-                ngrok_auth_token=str(d.get("ngrok_auth_token", "")),
             )
     except Exception:
         pass
@@ -162,10 +167,10 @@ def parse_range_header(header: str, size: int) -> tuple[int, int] | None:
     return start, min(end, size - 1)
 
 
-def build_url(parts: list[str], token_query: str) -> str:
+def build_url(parts: list[str]) -> str:
     encoded = "/".join(urllib.parse.quote(p, safe="") for p in parts)
     base = f"/{encoded}" if encoded else "/"
-    return base + token_query
+    return base
 
 
 # ─────────────────────────── HTTP handler factory ─────────────────────────────
@@ -174,6 +179,13 @@ CSS = """
 body{font-family:Inter,system-ui,sans-serif;background:#f6f7fb;margin:0;color:#171717}
 .wrap{max-width:1100px;margin:0 auto;padding:24px 16px}
 .head{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:20px 22px;margin-bottom:18px}
+.head-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.head-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:8px;border:1px solid #e5e7eb;background:#fff;color:#111827;
+    padding:8px 12px;border-radius:10px;text-decoration:none;font-size:.86rem;font-weight:600}
+.btn:hover{border-color:#93c5fd;box-shadow:0 4px 16px rgba(59,130,246,.10)}
+.btn-primary{background:#1d4ed8;color:#fff;border-color:#1d4ed8}
+.btn-primary:hover{background:#1e40af;border-color:#1e40af}
 h1{margin:0 0 6px;font-size:1.45rem;font-weight:600}
 .crumb{font-size:.88rem;color:#6b7280}
 .crumb a{color:#1d4ed8;text-decoration:none}
@@ -199,8 +211,6 @@ h1{margin:0 0 6px;font-size:1.45rem;font-weight:600}
 def build_handler(
     share_root: Path,
     title: str,
-    require_token: bool,
-    token: str,
     show_hidden: bool,
     event_logger,
 ):
@@ -215,41 +225,41 @@ def build_handler(
 
         def do_GET(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
-            query = urllib.parse.parse_qs(parsed.query)
+            _query = urllib.parse.parse_qs(parsed.query)
 
-            # 1. Token check
-            if require_token and query.get("t", [""])[0] != token:
-                self._respond_text(403, b"403 Forbidden")
-                event_logger(f"DENIED auth: {self.path}")
+            # Special route: download entire shared folder as a ZIP
+            if parsed.path == "/__download__":
+                self._serve_root_zip()
+                event_logger("ZIP /__download__")
                 return
 
-            # 2. Decode and sanitise path
+            # 1. Decode and sanitise path
             raw_parts = [p for p in urllib.parse.unquote(parsed.path).split("/") if p]
             if any(p in ("..", ".") for p in raw_parts):
                 self._respond_text(403, b"403 Forbidden")
                 event_logger(f"DENIED traversal: {self.path}")
                 return
 
-            # 3. Build absolute candidate and verify it lives inside root
+            # 2. Build absolute candidate and verify it lives inside root
             candidate = self.root.joinpath(*raw_parts)
             if not is_within_root(self.root, candidate):
                 self._respond_text(403, b"403 Forbidden")
                 event_logger(f"DENIED escape: {self.path}")
                 return
 
-            # 4. Existence check
+            # 3. Existence check
             if not candidate.exists():
                 self._respond_text(404, b"404 Not Found")
                 return
 
-            # 5. Hidden file check
+            # 4. Hidden file check
             rel = candidate.relative_to(self.root) if raw_parts else Path(".")
             if not show_hidden and raw_parts and is_hidden(rel):
                 self._respond_text(403, b"403 Forbidden")
                 event_logger(f"DENIED hidden: {self.path}")
                 return
 
-            # 6. Serve
+            # 5. Serve
             if candidate.is_dir():
                 self._serve_directory(candidate, raw_parts)
                 event_logger(f"DIR {self.path}")
@@ -283,14 +293,12 @@ def build_handler(
             self.wfile.write(body)
 
         def _serve_directory(self, folder: Path, path_parts: list[str]) -> None:
-            tq = f"?t={urllib.parse.quote(token, safe='')}" if require_token else ""
-
             # breadcrumb
-            crumb_parts = ['<a href="{}">Home</a>'.format(build_url([], tq))]
+            crumb_parts = ['<a href="{}">Home</a>'.format(build_url([]))]
             for i, part in enumerate(path_parts):
                 crumb_parts.append(
                     '<a href="{}">{}</a>'.format(
-                        build_url(path_parts[:i + 1], tq), html.escape(part)
+                        build_url(path_parts[:i + 1]), html.escape(part)
                     )
                 )
             breadcrumb = " / ".join(crumb_parts)
@@ -309,7 +317,7 @@ def build_handler(
                 if not show_hidden and is_hidden(rel):
                     continue
                 rel_parts = list(rel.parts)
-                href = build_url(rel_parts, tq)
+                href = build_url(rel_parts)
 
                 if entry.is_dir():
                     folders_html.append(
@@ -356,9 +364,16 @@ def build_handler(
 <style>{CSS}</style>
 </head><body><div class="wrap">
 <div class="head">
-  <h1>{html.escape(self.gallery_title)}</h1>
-  <div class="crumb">{breadcrumb}</div>
-  <div class="meta">{stats}  ·  Read-only delivery  ·  Tap a file to download</div>
+    <div class="head-top">
+        <div>
+            <h1>{html.escape(self.gallery_title)}</h1>
+            <div class="crumb">{breadcrumb}</div>
+            <div class="meta">{stats}  ·  Read-only delivery  ·  Tap a file to download</div>
+        </div>
+        <div class="head-actions">
+            <a class="btn btn-primary" href="/__download__">Download entire folder</a>
+        </div>
+    </div>
 </div>
 {body_html}
 </div></body></html>"""
@@ -415,6 +430,55 @@ def build_handler(
                     self.wfile.write(chunk)
                     remaining -= len(chunk)
 
+        def _serve_root_zip(self) -> None:
+            root_name = self.root.name or "shared-folder"
+            download_name = f"{root_name}.zip".replace('"', "")
+
+            tmp_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(prefix="secure-gallery-", suffix=".zip", delete=False) as tmp:
+                    tmp_path = Path(tmp.name)
+
+                with zipfile.ZipFile(
+                    tmp_path,
+                    mode="w",
+                    compression=zipfile.ZIP_DEFLATED,
+                    compresslevel=6,
+                ) as zf:
+                    for p in self.root.rglob("*"):
+                        try:
+                            rel = p.relative_to(self.root)
+                        except Exception:
+                            continue
+
+                        if not show_hidden and is_hidden(rel):
+                            continue
+                        if p.is_file():
+                            zf.write(p, arcname=str(rel))
+
+                size = tmp_path.stat().st_size
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Length", str(size))
+                self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
+                self._security_headers()
+                self.end_headers()
+
+                with tmp_path.open("rb") as src:
+                    while True:
+                        chunk = src.read(CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            except Exception:
+                self._respond_text(500, b"500 Failed to build ZIP")
+            finally:
+                if tmp_path is not None:
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
     return SecureHandler
 
 
@@ -456,14 +520,10 @@ class ShareController:
         root = Path(cfg.share_folder).expanduser().resolve()
         if not root.exists() or not root.is_dir():
             raise ValueError("Choose a valid folder to share.")
-        if cfg.require_token and not cfg.token.strip():
-            raise ValueError("Token is empty. Either add a token or uncheck 'Require token'.")
 
         handler_cls = build_handler(
             share_root=root,
             title=cfg.title.strip() or DEFAULT_TITLE,
-            require_token=cfg.require_token,
-            token=cfg.token.strip(),
             show_hidden=cfg.show_hidden,
             event_logger=self._log,
         )
@@ -473,15 +533,15 @@ class ShareController:
         self.server_thread.start()
 
         ip = get_local_ip()
-        tq = f"?t={urllib.parse.quote(cfg.token.strip(), safe='')}" if cfg.require_token else ""
-        self.local_url = f"http://{ip}:{cfg.port}{tq}"
+        self.local_url = f"http://{ip}:{cfg.port}"
         self.public_url = ""
 
         if cfg.enable_public_link:
-            if cfg.ngrok_auth_token.strip():
-                ngrok.set_auth_token(cfg.ngrok_auth_token.strip())
+            ngrok_token = (os.getenv("NGROK_AUTH_TOKEN") or os.getenv("NGROK_AUTHTOKEN") or "").strip()
+            if ngrok_token:
+                ngrok.set_auth_token(ngrok_token)
             self._tunnel = ngrok.connect(addr=str(cfg.port), bind_tls=True)
-            self.public_url = self._tunnel.public_url + tq
+            self.public_url = self._tunnel.public_url
 
         self._log("✅  Server started")
         return self.local_url, self.public_url
@@ -575,25 +635,16 @@ class Window(QWidget):
         self.port_input.setRange(1024, 65535)
         self.port_input.setFixedWidth(90)
 
-        self.require_token_cb = QCheckBox()
-        self.token_input = QLineEdit()
-        self.token_input.setPlaceholderText("any value, e.g. summer2024")
-
         self.show_hidden_cb = QCheckBox()
         self.show_hidden_cb.setChecked(False)
 
         self.public_link_cb = QCheckBox()
-        self.ngrok_token_input = QLineEdit()
-        self.ngrok_token_input.setPlaceholderText("Paste ngrok auth token (optional — one-time setup)")
 
         form.addRow("Folder to share", folder_widget)
         form.addRow("Gallery title", self.title_input)
         form.addRow("Port", self.port_input)
-        form.addRow("Require access token", self.require_token_cb)
-        form.addRow("Token value", self.token_input)
         form.addRow("Show hidden files", self.show_hidden_cb)
         form.addRow("Enable public ngrok link", self.public_link_cb)
-        form.addRow("ngrok auth token", self.ngrok_token_input)
         root_layout.addWidget(settings_box)
 
         # ── links group
@@ -676,11 +727,8 @@ class Window(QWidget):
         self.folder_input.setText(self.cfg.share_folder)
         self.title_input.setText(self.cfg.title)
         self.port_input.setValue(self.cfg.port)
-        self.require_token_cb.setChecked(self.cfg.require_token)
-        self.token_input.setText(self.cfg.token)
         self.show_hidden_cb.setChecked(self.cfg.show_hidden)
         self.public_link_cb.setChecked(self.cfg.enable_public_link)
-        self.ngrok_token_input.setText(self.cfg.ngrok_auth_token)
 
     # ── collect current form values ───────────────────────────────────────────
 
@@ -689,11 +737,8 @@ class Window(QWidget):
             share_folder=self.folder_input.text().strip(),
             title=self.title_input.text().strip() or DEFAULT_TITLE,
             port=self.port_input.value(),
-            require_token=self.require_token_cb.isChecked(),
-            token=self.token_input.text().strip(),
             show_hidden=self.show_hidden_cb.isChecked(),
             enable_public_link=self.public_link_cb.isChecked(),
-            ngrok_auth_token=self.ngrok_token_input.text().strip(),
         )
 
     # ── UI state helpers ──────────────────────────────────────────────────────
