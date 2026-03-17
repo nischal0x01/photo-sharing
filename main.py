@@ -466,6 +466,9 @@ def build_handler(
                 with tempfile.NamedTemporaryFile(prefix="secure-gallery-", suffix=".zip", delete=False) as tmp:
                     tmp_path = Path(tmp.name)
 
+                skipped: list[str] = []
+                skipped_count = 0
+
                 with zipfile.ZipFile(
                     tmp_path,
                     mode="w",
@@ -480,8 +483,30 @@ def build_handler(
 
                         if not show_hidden and is_hidden(rel):
                             continue
-                        if p.is_file():
+
+                        # Preserve empty directories (nice-to-have)
+                        try:
+                            if p.is_dir():
+                                try:
+                                    next(p.iterdir())
+                                except StopIteration:
+                                    zf.writestr(str(rel).rstrip("/") + "/", "")
+                                continue
+
+                            if not p.is_file():
+                                continue
+
                             zf.write(p, arcname=str(rel))
+                        except Exception:
+                            skipped_count += 1
+                            if len(skipped) < 20:
+                                skipped.append(str(rel))
+                            continue
+
+                if skipped_count:
+                    preview = ", ".join(skipped)
+                    more = "" if skipped_count <= len(skipped) else f" (+{skipped_count - len(skipped)} more)"
+                    event_logger(f"ZIP skipped {skipped_count} unreadable item(s): {preview}{more}")
 
                 size = tmp_path.stat().st_size
                 self.send_response(200)
