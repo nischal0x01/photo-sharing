@@ -289,13 +289,13 @@ python3 main.py
 ```
 
 > **Tip — convenience launcher:**  Create a shell script `start.sh`:
+> **Tip — convenience launcher:**  Use the included [start.command](start.command).
+> 
+> One-time setup:
 > ```bash
-> #!/bin/bash
-> cd "$(dirname "$0")"
-> source .venv/bin/activate
-> python3 main.py
+> chmod +x start.command
 > ```
-> Then `chmod +x start.sh` and double-click it from Finder (you may need to allow it under System Settings → Privacy & Security).
+> Then double-click it from Finder (you may need to allow it under System Settings → Privacy & Security).
 
 ---
 
@@ -315,14 +315,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-> **Tip — convenience launcher:**  Create `start_gallery.bat` in the project root:
-> ```bat
-> @echo off
-> cd /d "%~dp0"
-> call .venv\Scripts\activate
-> python main.py
-> pause
-> ```
+> **Tip — convenience launcher:**  Use the included [start_gallery.bat](start_gallery.bat).
 > Double-click it to launch. Remove `pause` if you don't want the terminal window.
 
 > **Note on Windows Defender Firewall:**  The first time you start sharing, Windows may ask whether to allow Python on private/public networks. Allow it for your chosen network type.
