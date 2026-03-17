@@ -4,7 +4,7 @@ Secure Client Gallery — macOS build
 Desktop GUI app (PySide6) that serves a selected folder as a read-only
 HTTP gallery with optional ngrok tunnel.
 
-Run:  python3 main.py
+Run:  python3 code/main.py
 """
 from __future__ import annotations
 
@@ -58,7 +58,13 @@ DEFAULT_PORT = 8080
 CHUNK_SIZE = 16 * 1024 * 1024  # 16 MB per read — handles 50 GB+ without RAM issues
 
 if load_dotenv is not None:
-    load_dotenv()
+    # Prefer the repo-root .env (one folder above this file), but allow normal
+    # python-dotenv discovery as a fallback.
+    repo_root_env = Path(__file__).resolve().parent.parent / ".env"
+    if repo_root_env.exists():
+        load_dotenv(dotenv_path=repo_root_env)
+    else:
+        load_dotenv()
 
 # ─────────────────────────── config ───────────────────────────────────────────
 

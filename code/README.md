@@ -282,18 +282,18 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 # 3. Install dependencies
-pip install -r requirements.txt
+pip install -r code/requirements.txt
 
 # 4. Run the app
-python3 main.py
+python3 code/main.py
 ```
 
 > **Tip — convenience launcher:**  Create a shell script `start.sh`:
-> **Tip — convenience launcher:**  Use the included [start.command](start.command).
+> **Tip — convenience launcher:**  Use the included [start.command](code/start.command).
 > 
 > One-time setup:
 > ```bash
-> chmod +x start.command
+> chmod +x code/start.command
 > ```
 > Then double-click it from Finder (you may need to allow it under System Settings → Privacy & Security).
 
@@ -309,10 +309,10 @@ python -m venv .venv
 .venv\Scripts\activate
 
 # 3. Install dependencies
-pip install -r requirements.txt
+pip install -r code/requirements.txt
 
 # 4. Run
-python main.py
+python code/main.py
 ```
 
 > **Tip — convenience launcher:**  Use the included [start_gallery.bat](start_gallery.bat).
@@ -344,7 +344,7 @@ ngrok is optional. Skip it if you only need to share on your local network (same
 ## Daily Workflow
 
 ```
-1. Open terminal  →  source .venv/bin/activate  →  python3 main.py
+1. Open terminal  →  source .venv/bin/activate  →  python3 code/main.py
 2. Click Browse   →  select your delivery folder
 3. (Optional) Set `NGROK_AUTH_TOKEN` in `.env` and check "Enable public ngrok link"
 4. Click ▶ Start Sharing
@@ -384,11 +384,11 @@ The path in the folder field doesn't exist or was moved.  Click Browse again to 
 - Check that you have enough disk space on the client side.
 
 ### App won't start — "No module named PySide6"
-The virtual environment is not activated, or `pip install -r requirements.txt` was not run inside it.
+The virtual environment is not activated, or `pip install -r code/requirements.txt` was not run inside it.
 
 ```bash
 source .venv/bin/activate   # Mac
-pip install -r requirements.txt
+pip install -r code/requirements.txt
 ```
 
 ### High CPU when idle

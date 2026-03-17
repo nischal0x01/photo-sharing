@@ -2,6 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
+cd ..
 
 echo "Starting Secure Client Gallery…"
 
@@ -14,7 +15,7 @@ source .venv/bin/activate
 
 echo "Ensuring dependencies are installed…"
 python -m pip install --upgrade pip > /dev/null
-python -m pip install -r requirements.txt
+python -m pip install -r code/requirements.txt
 
 echo "Launching app…"
-python main.py
+python code/main.py
