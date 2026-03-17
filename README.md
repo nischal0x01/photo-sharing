@@ -30,7 +30,7 @@ Anyone who has the link can browse the folder and download files through a clean
 **Key capabilities:**
 - Share any folder (photos, videos, ZIPs, PDFs) without cloud uploads.
 - Optional ngrok link so clients outside your LAN can download.
-- One-click download: a **Download entire folder** button creates a ZIP of the shared folder.
+- One-click download: **Download this folder** / **Download entire folder** buttons create a ZIP.
 - 50 GB+ downloads work (16 MB streaming chunks, HTTP Range support for resume).
 - Hidden files (`.DS_Store`, `.git`, etc.) are filtered by default.
 - Access log visible in real time inside the desktop app.

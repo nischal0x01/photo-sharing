@@ -227,17 +227,33 @@ def build_handler(
             parsed = urllib.parse.urlparse(self.path)
             _query = urllib.parse.parse_qs(parsed.query)
 
-            # Special route: download entire shared folder as a ZIP
-            if parsed.path == "/__download__":
-                self._serve_root_zip()
-                event_logger("ZIP /__download__")
-                return
-
             # 1. Decode and sanitise path
             raw_parts = [p for p in urllib.parse.unquote(parsed.path).split("/") if p]
             if any(p in ("..", ".") for p in raw_parts):
                 self._respond_text(403, b"403 Forbidden")
                 event_logger(f"DENIED traversal: {self.path}")
+                return
+
+            # Special route: download folder as a ZIP
+            # - /__download__            -> zip the shared root
+            # - /__download__/A/B        -> zip that subfolder (must be inside root)
+            if raw_parts and raw_parts[0] == "__download__":
+                sub_parts = raw_parts[1:]
+                target = self.root.joinpath(*sub_parts) if sub_parts else self.root
+                if not is_within_root(self.root, target):
+                    self._respond_text(403, b"403 Forbidden")
+                    event_logger(f"DENIED zip escape: {self.path}")
+                    return
+                if not target.exists() or not target.is_dir():
+                    self._respond_text(404, b"404 Not Found")
+                    return
+                if not show_hidden and sub_parts and is_hidden(Path(*sub_parts)):
+                    self._respond_text(403, b"403 Forbidden")
+                    event_logger(f"DENIED zip hidden: {self.path}")
+                    return
+
+                self._serve_folder_zip(target)
+                event_logger(f"ZIP {self.path}")
                 return
 
             # 2. Build absolute candidate and verify it lives inside root
@@ -293,6 +309,9 @@ def build_handler(
             self.wfile.write(body)
 
         def _serve_directory(self, folder: Path, path_parts: list[str]) -> None:
+            download_current = build_url(["__download__"] + path_parts)
+            download_root = build_url(["__download__"])
+
             # breadcrumb
             crumb_parts = ['<a href="{}">Home</a>'.format(build_url([]))]
             for i, part in enumerate(path_parts):
@@ -356,6 +375,14 @@ def build_handler(
             if not folders_html and not files_html:
                 body_html = '<div class="empty">This folder is empty</div>'
 
+            if not path_parts:
+                actions_html = f'<a class="btn btn-primary" href="{download_root}">Download entire folder</a>'
+            else:
+                actions_html = (
+                    f'<a class="btn btn-primary" href="{download_current}">Download this folder</a>'
+                    f'<a class="btn" href="{download_root}">Download entire folder</a>'
+                )
+
             page = f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -371,7 +398,7 @@ def build_handler(
             <div class="meta">{stats}  ·  Read-only delivery  ·  Tap a file to download</div>
         </div>
         <div class="head-actions">
-            <a class="btn btn-primary" href="/__download__">Download entire folder</a>
+            {actions_html}
         </div>
     </div>
 </div>
@@ -430,9 +457,9 @@ def build_handler(
                     self.wfile.write(chunk)
                     remaining -= len(chunk)
 
-        def _serve_root_zip(self) -> None:
-            root_name = self.root.name or "shared-folder"
-            download_name = f"{root_name}.zip".replace('"', "")
+        def _serve_folder_zip(self, folder: Path) -> None:
+            base_name = folder.name or (self.root.name or "shared-folder")
+            download_name = f"{base_name}.zip".replace('"', "")
 
             tmp_path: Path | None = None
             try:
@@ -445,9 +472,9 @@ def build_handler(
                     compression=zipfile.ZIP_DEFLATED,
                     compresslevel=6,
                 ) as zf:
-                    for p in self.root.rglob("*"):
+                    for p in folder.rglob("*"):
                         try:
-                            rel = p.relative_to(self.root)
+                            rel = p.relative_to(folder)
                         except Exception:
                             continue
 
